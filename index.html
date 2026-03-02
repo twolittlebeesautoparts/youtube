@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Domain Media Converter (MP3 / MP4)</title>
+  <title>Legal File Converter (Domain Only)</title>
   <style>
     body { font-family: Arial, sans-serif; background:#0b0f14; color:#e8eef7; padding:24px; }
     .card { max-width: 820px; margin: 0 auto; background:#121826; border:1px solid #223048; border-radius:14px; padding:18px; }
@@ -27,10 +27,10 @@
 </head>
 <body>
   <div class="card">
-    <h1>Domain Media Converter</h1>
+    <h1>Legal File Converter (Domain Only)</h1>
     <p>
-      Paste a <b>direct file link</b> hosted on your own domain (example: <span class="warn">https://yourdomain.com/media/video.mp4</span>),
-      then convert to MP3 or MP4 inside the browser.
+      Paste a <b>direct media file URL</b> on your allowed domain (example:
+      <span class="warn">https://yourdomain.com/media/video.mp4</span>), then convert to MP3 or MP4 in-browser.
     </p>
 
     <div class="row">
@@ -56,24 +56,25 @@
     <div class="small">
       Notes:
       <ul>
-        <li>URL must be a <b>direct media file</b> (mp4, mov, m4a, mp3, wav, etc.).</li>
-        <li>Your server must allow browser fetch (CORS). If not, conversion will fail.</li>
-        <li>Big files can be heavy in the browser.</li>
+        <li>Must be a <b>direct</b> file URL (mp4, mov, webm, mp3, wav, m4a, etc.)</li>
+        <li>If media is hosted elsewhere, that server must allow CORS.</li>
       </ul>
     </div>
   </div>
 
   <script type="module">
     import { FFmpeg } from "https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
+    import { toBlobURL } from "https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js";
 
-    // ✅ EDIT THIS: Only these hostnames are allowed
+    // ✅ EDIT THIS: only allow YOUR domains
     const ALLOWED_HOSTS = new Set([
-      "yourdomain.com",
-      "www.yourdomain.com",
+      "twolittlebeesautoparts.github.io",
+      // "yourdomain.com",
+      // "www.yourdomain.com",
       // "cdn.yourdomain.com",
     ]);
 
-    // Optional: only allow specific file extensions
+    // Optional: only allow certain extensions
     const ALLOWED_EXTS = new Set(["mp4","mov","m4v","mkv","webm","mp3","wav","m4a","aac","flac","ogg"]);
 
     const urlEl = document.getElementById("url");
@@ -90,13 +91,15 @@
       logEl.textContent += msg + "\n";
       logEl.scrollTop = logEl.scrollHeight;
     }
-
     function setBusy(isBusy) {
       btn.disabled = isBusy;
       urlEl.disabled = isBusy;
       formatEl.disabled = isBusy;
     }
-
+    function getExtFromPath(pathname) {
+      const m = pathname.toLowerCase().match(/\.([a-z0-9]+)$/);
+      return m ? m[1] : "";
+    }
     function safeBaseName(name) {
       return (name || "converted")
         .replace(/\.[^.]+$/, "")
@@ -104,39 +107,36 @@
         .slice(0, 60) || "converted";
     }
 
-    function getExtFromPath(pathname) {
-      const m = pathname.toLowerCase().match(/\.([a-z0-9]+)$/);
-      return m ? m[1] : "";
-    }
-
     function validateUrl(input) {
       let u;
-      try {
-        u = new URL(input);
-      } catch {
-        throw new Error("Invalid URL.");
-      }
+      try { u = new URL(input); } catch { throw new Error("Invalid URL."); }
 
       if (u.protocol !== "https:" && u.protocol !== "http:") {
         throw new Error("URL must start with http:// or https://");
       }
-
       if (!ALLOWED_HOSTS.has(u.hostname)) {
-        throw new Error(`Blocked: domain not allowed (${u.hostname}).`);
+        throw new Error(`Blocked domain: ${u.hostname} (not in allowlist).`);
       }
-
       const ext = getExtFromPath(u.pathname);
       if (!ext || !ALLOWED_EXTS.has(ext)) {
-        throw new Error(`Blocked: file type not allowed (.${ext || "unknown"}). Use a direct media file URL.`);
+        throw new Error(`Blocked file type (.${ext || "unknown"}). Use a direct media file URL.`);
       }
-
       return u;
     }
 
     async function ensureLoaded() {
       if (ffmpeg.loaded) return;
-      statusEl.textContent = "Loading FFmpeg in browser...";
-      log("Loading FFmpeg... (first load can be slower)");
+
+      statusEl.textContent = "Loading FFmpeg...";
+      log("Loading FFmpeg core...");
+
+      // ✅ Important: load core/wasm/worker as BLOB URLs
+      // This fixes: "Failed to construct 'Worker' ... cannot be accessed from origin ..."
+      const coreBase = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
+
+      const coreURL   = await toBlobURL(`${coreBase}/ffmpeg-core.js`, "text/javascript");
+      const wasmURL   = await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, "application/wasm");
+      const workerURL = await toBlobURL(`${coreBase}/ffmpeg-core.worker.js`, "text/javascript");
 
       ffmpeg.on("progress", ({ progress }) => {
         const pct = Math.max(0, Math.min(100, Math.round(progress * 100)));
@@ -144,57 +144,20 @@
         statusEl.textContent = `Converting... ${pct}%`;
       });
 
-      await ffmpeg.load();
+      await ffmpeg.load({ coreURL, wasmURL, workerURL });
+
       log("FFmpeg loaded ✅");
       statusEl.textContent = "Ready.";
     }
 
-    async function fetchWithProgress(url) {
-      log("Fetching file...");
+    async function fetchBytes(url) {
       statusEl.textContent = "Downloading file...";
-
-      const res = await fetch(url, {
-        method: "GET",
-        // credentials: "include", // only if your domain uses cookies AND you want that
-        // mode: "cors" is default for cross-origin; same-origin also ok
-      });
-
+      log("Fetching file...");
+      const res = await fetch(url);
       if (!res.ok) throw new Error(`Fetch failed: ${res.status} ${res.statusText}`);
-
-      const contentLength = res.headers.get("content-length");
-      const total = contentLength ? parseInt(contentLength, 10) : 0;
-
-      // Stream if possible (better progress), fallback to arrayBuffer
-      if (!res.body || !total) {
-        log("No streaming/content-length; downloading without progress bar...");
-        const buf = await res.arrayBuffer();
-        return new Uint8Array(buf);
-      }
-
-      const reader = res.body.getReader();
-      let received = 0;
-      const chunks = [];
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-
-        const pct = Math.max(0, Math.min(99, Math.round((received / total) * 100)));
-        progressEl.value = pct;
-        statusEl.textContent = `Downloading... ${pct}%`;
-      }
-
-      // concat
-      let size = 0;
-      for (const c of chunks) size += c.length;
-      const out = new Uint8Array(size);
-      let offset = 0;
-      for (const c of chunks) { out.set(c, offset); offset += c.length; }
-
-      log(`Downloaded ${(size/1024/1024).toFixed(1)} MB ✅`);
-      return out;
+      const buf = await res.arrayBuffer();
+      log(`Downloaded ${(buf.byteLength/1024/1024).toFixed(1)} MB ✅`);
+      return new Uint8Array(buf);
     }
 
     btn.addEventListener("click", async () => {
@@ -212,49 +175,33 @@
 
         const u = validateUrl(input);
         log(`URL OK ✅ (${u.hostname})`);
-        log(`Path: ${u.pathname}`);
 
         const ext = getExtFromPath(u.pathname);
-        const base = safeBaseName(u.pathname.split("/").pop());
+        const fileName = u.pathname.split("/").pop() || `file.${ext}`;
+        const base = safeBaseName(fileName);
+
         const inputName = `input_${Date.now()}.${ext}`;
         const outputName = `${base}.${outFormat}`;
 
-        // Download file bytes from your domain
-        const bytes = await fetchWithProgress(u.toString());
+        const bytes = await fetchBytes(u.toString());
 
-        statusEl.textContent = "Writing file...";
+        statusEl.textContent = "Preparing...";
         await ffmpeg.writeFile(inputName, bytes);
 
-        // Convert
         progressEl.value = 0;
 
         if (outFormat === "mp3") {
-          log("Converting to MP3...");
-          await ffmpeg.exec([
-            "-i", inputName,
-            "-vn",
-            "-b:a", "192k",
-            "-ar", "44100",
-            outputName
-          ]);
+          log("Converting → MP3...");
+          await ffmpeg.exec(["-i", inputName, "-vn", "-b:a", "192k", "-ar", "44100", outputName]);
         } else {
-          log("Converting to MP4...");
-          await ffmpeg.exec([
-            "-i", inputName,
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            outputName
-          ]);
+          log("Converting → MP4...");
+          await ffmpeg.exec(["-i", inputName, "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", outputName]);
         }
 
         statusEl.textContent = "Preparing download...";
-        log("Reading output...");
-
         const data = await ffmpeg.readFile(outputName);
+
         const mime = outFormat === "mp3" ? "audio/mpeg" : "video/mp4";
         const blob = new Blob([data.buffer], { type: mime });
         const dlUrl = URL.createObjectURL(blob);
@@ -265,11 +212,12 @@
         downloadLink.style.display = "inline-block";
 
         statusEl.textContent = "Done ✅";
-        log("Conversion complete ✅");
+        log("Done ✅");
 
         // Cleanup virtual FS
         try { await ffmpeg.deleteFile(inputName); } catch {}
         try { await ffmpeg.deleteFile(outputName); } catch {}
+
       } catch (err) {
         console.error(err);
         statusEl.textContent = "Error ❌";
@@ -277,7 +225,6 @@
         alert(err?.message || "Conversion failed. Check log.");
       } finally {
         setBusy(false);
-        progressEl.value = 100;
       }
     });
   </script>
